@@ -8,6 +8,7 @@ import random
 import cvxpy as cp
 import numpy as np
 from scipy.optimize import least_squares
+from scipy.linalg import orthogonal_procrustes
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 import matplotlib.pyplot as plt
 from queue import Queue
@@ -211,7 +212,29 @@ class ConfigServer:
         for row_idx, row in enumerate(matrix, start=1):
             row_str = "  ".join(f"{val:>5.2f}" for val in row)  # rounded to 2 decimals
             print(f"{row_idx:>3} | {row_str}")
-            
+    
+    #using scipy orthogonal_procrustes automaticali correct rotation and translation of calculated data
+    def Correction_pos(self): 
+        real = np.column_stack((self.Real_x_Data, self.Real_y_Data))
+        calc = np.column_stack((self.calculated_x_Data, self.calculated_y_Data))
+        
+        #removing tag from real data
+        real = real[:-1]
+        
+        r_centroid = real.mean(axis=0)
+        c_centroid = calc.mean(axis=0)
+        
+        R = real - r_centroid
+        C = calc - c_centroid
+        
+        rotation, _ = orthogonal_procrustes(C, R)
+        translation = r_centroid - c_centroid @ rotation
+        
+        corrected = calc @ rotation + translation
+        
+        self.calculated_x_Data = corrected[:, 0].tolist()
+        self.calculated_y_Data = corrected[:, 1].tolist()
+        
     def estimate_anchor_positions_scipy(self, D, Sigma, dim=2):
         #dont ask i dont know but it works
         
@@ -267,6 +290,8 @@ class ConfigServer:
         # Ensure anchor0 is exactly fixed
         positions[0,0] = anchor0_x
         positions[0,1] = anchor0_y
+        
+        
 
         return positions  
         
@@ -352,44 +377,8 @@ class ConfigServer:
                 for pos in positions:
                     self.calculated_x_Data.append(pos[0])
                     self.calculated_y_Data.append(pos[1])
+                self.Correction_pos()
                 self.data_queue.put((self.Real_x_Data, self.Real_y_Data, self.calculated_x_Data, self.calculated_y_Data))
-            #manual correction
-            elif cmd == "vertical":
-                anchor_x = self.calculated_x_Data[0]
-                # Flip over vertical axis through anchor point
-                self.calculated_x_Data = [2*anchor_x - x for x in self.calculated_x_Data]
-                # y stays the same
-                self.data_queue.put((self.Real_x_Data, self.Real_y_Data, self.calculated_x_Data, self.calculated_y_Data))
-            elif cmd == "horizontal":
-                anchor_y = self.calculated_y_Data[0]
-                # Flip over horizontal axis through anchor point
-                self.calculated_y_Data = [2*anchor_y - y for y in self.calculated_y_Data]
-                # x stays the same
-                self.data_queue.put((self.Real_x_Data, self.Real_y_Data, self.calculated_x_Data, self.calculated_y_Data))
-            elif cmd == "rotate":
-                anchor_x = self.calculated_x_Data[0]
-                anchor_y = self.calculated_y_Data[0]
-                degree = float(input("Enter rotation angle in degrees: "))
-                rad = np.radians(degree)
-
-                new_x = []
-                new_y = []
-
-                for x, y in zip(self.calculated_x_Data, self.calculated_y_Data):
-                    # Translate so anchor is at origin
-                    tx = x - anchor_x
-                    ty = y - anchor_y
-                    # Rotate
-                    rx = tx * np.cos(rad) - ty * np.sin(rad)
-                    ry = tx * np.sin(rad) + ty * np.cos(rad)
-                    # Translate back
-                    new_x.append(rx + anchor_x)
-                    new_y.append(ry + anchor_y)
-
-                self.calculated_x_Data = new_x
-                self.calculated_y_Data = new_y
-                self.data_queue.put((self.Real_x_Data, self.Real_y_Data, self.calculated_x_Data, self.calculated_y_Data))
-            #end of manual correction
             elif cmd == "locate":
                 print("[SERVER] Starting tag...")
 
