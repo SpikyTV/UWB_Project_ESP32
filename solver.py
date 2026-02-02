@@ -19,8 +19,10 @@ import json
 import paho.mqtt.client as mqtt
 
 # data structures
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from typing import Tuple, List
+
+import time
 
 @dataclass
 class Nodes:
@@ -47,7 +49,7 @@ class Solver:
     #   anchor and tag position estimation
     
     def __init__(self):
-        # TODO: move to config / autolocate
+        # TODO: move to config / autodiscover
         # MQTT conf
         self.BROKER_IP = "127.0.0.1"   #Mosquitto
         self.BROKER_PORT = 1883
@@ -55,7 +57,9 @@ class Solver:
         # MQTT Topics
         self.TOPIC = "hub/+/data"     
         self.TOPIC2 = "hub/+/command"     
-        self.TOPIC3 = "hub/+/register"     
+        self.TOPIC3 = "hub/solver/register"     
+        self.TOPIC4 = "hub/+/UIData"
+        self.TOPIC5 = "hub/solver/UICommand"
         
         #threadsafe?
         self.measurement_done = threading.Event()
@@ -78,7 +82,7 @@ class Solver:
     
     def get_nodes(self):
         # returns node dictionary
-        return self.nodes
+        return self.nodes.values()
 
     def on_connect(self, client, userdata, flags, reason_code, properties):
         # MQTT on_connect callback
@@ -86,6 +90,7 @@ class Solver:
             print("Connected to MQTT broker")
             self.client.subscribe(self.TOPIC)
             self.client.subscribe(self.TOPIC3)
+            self.client.subscribe(self.TOPIC5)
         else:
             print(f"Connection failed (reason_code={reason_code})")
         
@@ -100,16 +105,18 @@ class Solver:
             print("Error processing message:", e)
             
     def message_processor(self):
-        # |thread| processes MQTT messages
+        # processes MQTT messages
         while True:
             node_id, in_topic, data = self.msg_queue.get()  # blocks until message is available
 
             print(f"Processing {in_topic} from {node_id}")
             
             if in_topic == "register":
-                self.register_client(data)
+                threading.Thread(target=self.register_client, args=(data,), daemon=True).start()
             elif in_topic == "data":
-                self.receive_data(data)
+                threading.Thread(target=self.receive_data, args=(data,), daemon=True).start()
+            elif in_topic == "UICommand":
+                threading.Thread(target=self.handle_UIcommand, args=(data,), daemon=True).start()
             else:
                 print(f"unknown topic: {in_topic}")
 
@@ -122,6 +129,9 @@ class Solver:
         
         self.nodes[node_id] = Nodes(node_id, tag, (x, y))
         
+        # send updated positions to UI       
+        self.send_UIData()
+        
         #move to log
         print(f"[SERVER] Registered client: {self.nodes[node_id]}")
     
@@ -133,10 +143,16 @@ class Solver:
         x = data.get('x')
         y = data.get('y')
         
+        
         node.real = (x, y)
         node.distance = data.get('distance')
 
         node.dispersion = data.get('dispersion')
+        
+        print(f"incoming data dist: {data.get('distance')}, disp {data.get('dispersion')}")
+        
+        if data.get('tag') == "tag":
+            self.estimate_tag_position()
         
         #signal Data Recieved
         print(f"[SERVER] Data received from {node_id}")
@@ -146,13 +162,25 @@ class Solver:
         # starts mesurments between anchors
         # triggers position estimation
         print("[SERVER] Starting measurements...")
+        
+        payload = {
+            "type": "command",
+            "command": "uwb"
+        }
+        
+        topic = "hub/uwb/command"
+
+        #on connect sends register topic with 1 send garanteed
+        self.client.publish(topic, json.dumps(payload), qos=1)
 
         anchor_nodes = [node for node in self.nodes.values() if node.tag == "anch"]
+        
+        time.sleep(2)
         
         for node in anchor_nodes:
             print(f"\n[SERVER] Sending measurement command to client: {node.id}...")
             
-            payload = {"command": "start_measurement"}
+            payload = {"type": "command", "command": "start_measurement"}
             topic = f"hub/{node.id}/command"
             
             self.measurement_done.clear()
@@ -164,6 +192,7 @@ class Solver:
             if not finished:
                 print(f"[SERVER] Failed to receive data from node: {node.id}")  
                 
+            
         self.estimate_anchor_positions_scipy()
                 
     def measure_tag(self):
@@ -176,7 +205,7 @@ class Solver:
         for node in tag_nodes:
             print(f"\n[SERVER] Sending measurement command to client: {node.id}...")
             
-            payload = {"command": "start_measurement"}
+            payload = {"type": "command", "command": "start_tag"}
             topic = f"hub/{node.id}/command"
             
             self.measurement_done.clear()
@@ -230,6 +259,9 @@ class Solver:
         # Write back corrected positions to nodes
         for node, pos in zip(anchor_nodes, corrected):
             node.calculated = tuple(pos)
+        
+        # send updated positions to UI       
+        self.send_UIData()
         
     def estimate_anchor_positions_scipy(self, dim=2):
         # Estimate anchor positions from pairwise distances using weighted nonlinear least squares.
@@ -311,22 +343,30 @@ class Solver:
             
             # Save directly to node
             tag_node.calculated = tuple(result.x)
+            
+            # send update to UI
+            self.send_UIData()
     
-    def run(self):
-        # non blocking command execution
+    def send_UIData(self):
+        payload = {"nodes": [asdict(node) for node in self.nodes.values()]}
         
-        while True:
-            cmd = self.command_queue.get()
-
-            if cmd == "measure_anchors":
-                self.measure_anchor()
-
-            elif cmd == "measure_tags":
-                self.measure_tag()
+        topic = f"hub/server/UIData"
+        self.client.publish(topic, json.dumps(payload), qos=1)
+    
+    def handle_UIcommand(self, data):
+        # command handeling
+        command = data.get("command")
         
+        print(f"executing command {command}")
+        
+        if command == "measure_anchors":
+            self.measure_anchor()
+        elif command == "measure_tags":
+            self.measure_tag()
+        elif command == "send_nodes":
+            self.send_UIData()
         
 if __name__ == "__main__":
-    solver = Solver()
-    threading.Thread(target=solver.message_processor, daemon=True).start()
-    solver.run()
     
+    solver = Solver()
+    solver.message_processor()
