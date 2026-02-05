@@ -73,9 +73,9 @@ class ESP32_Sim:
     def config(self, data):
         self.ESP_ID = data.get("id")
         self.tag = data.get("tag")
-        self.cords = (float(data.get("x")), float(data.get("y")))
-        
-        x, y = self.cords
+        x = float(data.get("x"))
+        y = float(data.get("y"))
+        self.cords = (x, y)
         
         payload = {
             "id": self.ESP_ID,
@@ -157,13 +157,9 @@ class ESP32_Sim:
             self.mean += delta / self.count
             delta2 = value - self.mean
             self.M2 += delta * delta2
-        else:
-            pass
 
-    def get_mean(self) -> float:
-        return self.mean
-
-    def get_dispersion(self) -> float:
+    #Welford’s online algorithm readout
+    def get_dispersion(self):
         if self.count < 2:
             return 0.0
         variance = self.M2 / (self.count - 1)
@@ -179,8 +175,8 @@ class ESP32_Sim:
             distance = running_value_calculation.generate_distance(real_distance)
             self.add(distance)
 
-        self.list_distance.append(round(abs(self.get_mean()), 2))
-        self.list_dispersion.append(round(abs(self.get_dispersion()), 2))
+        self.list_distance.append(self.mean)
+        self.list_dispersion.append(self.get_dispersion())
         
         print(self.list_distance)
         print(self.list_dispersion)
@@ -193,7 +189,7 @@ class ESP32_Sim:
         self.list_dispersion = []
 
         
-        for other_id, data in self.others.items():
+        for other_id, data in sorted(self.others.items()):
             
             x2, y2 = data.get("cords")
             tag = data.get("tag")
@@ -268,7 +264,7 @@ class ESP32_Sim:
                 time.sleep(0.05)
         elif command == "uwb":
             
-            time.sleep(int(self.ESP_ID.split("_")[-1]) * 0.05)
+            time.sleep(1 + (int(self.ESP_ID.split("_")[-1]) * 0.05))
             
             payload = {
                 "type": "uwb",

@@ -60,6 +60,8 @@ class ESP32_Manager:
         
     def register_client(self, node_id):
         
+        print("recievd first reg")
+        
         id = f"ESP32_{len(self.nodes)}"
         self.nodes[id] = Nodes(id, "NotSet", (0, 0))
         
@@ -81,7 +83,7 @@ class ESP32_Manager:
         node = self.nodes[data.get("id")]
         
         node.tag = data.get("tag")
-        node.real = (data.get("x"), data.get("y"))
+        node.real = (data.get("x"), data.get("y")) #TODO not used anywhere 
         
         self.send_UIData()
         
@@ -134,12 +136,6 @@ class ESP32_Manager:
         
     def configure_ESP32(self, tag, cords):
         print (f"configuring ESP32 WITH {tag} and {cords}")
-
-    def send_UIData(self):
-        payload = {"nodes": [asdict(node) for node in self.nodes.values()]}
-        
-        topic = f"hub/ESP32_Manager/UIData"
-        self.client.publish(topic, json.dumps(payload), qos=1)
 
     def handle_UIcommand(self, data):
         # command handeling

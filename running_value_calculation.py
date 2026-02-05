@@ -10,14 +10,14 @@ class Stats:
 # ---------------------------
 # Distance generator function
 # ---------------------------
-def generate_distance(true_distance=10.0, std_dev=0.30):
-    
-    # chance of random big error
-    if random.random() < 0.02:
-        return true_distance + random.uniform(0.5, 3.0)
-    
-    # normal mesurment
-    u1 = random.random()
-    u2 = random.random()
-    z = (-2 * math.log(u1)) ** 0.5 * math.cos(2 * math.pi * u2)
-    return true_distance + z * std_dev
+def generate_distance(real_distance, standard_diviation=0.3):
+    #generate  random intiger divide by max intiger offset to +- 0.5 multiply by standard diviation
+    #default 0.3 (+- 30cm should be standard for real uwb)
+    noise = random.uniform(-standard_diviation, standard_diviation)
+        
+    #small chance for error data (1 in 100)
+    #will add 0.5 to 3 meters
+    if random.random() < 0.01:
+        noise += random.uniform(0.5, 3)
+        
+    return real_distance + noise
