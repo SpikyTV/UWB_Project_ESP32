@@ -1,5 +1,10 @@
+import csv
+import os
+
 # threading and sync
 import threading
+
+from filterpy.kalman import KalmanFilter
 
 # NumPy for vector and matrix
 import numpy as np
@@ -23,6 +28,7 @@ from dataclasses import dataclass, field, asdict
 from typing import Tuple, List
 
 import time
+import math
 
 @dataclass
 class Nodes:
@@ -49,6 +55,11 @@ class Solver:
     #   anchor and tag position estimation
     
     def __init__(self):
+        
+        self.counter = 0
+        self.diff = 0
+        self.diff_k = 0
+        
         # TODO: move to config / autodiscover
         # MQTT conf
         self.BROKER_IP = "127.0.0.1"   #Mosquitto
@@ -70,6 +81,9 @@ class Solver:
         
         # dictionary of all nodes
         self.nodes = {}
+        
+        self.kf = None
+        self.kf_last_t = None
         
         # MQTT client setup (version2)
         self.client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
@@ -152,6 +166,12 @@ class Solver:
         print(f"incoming data dist: {data.get('distance')}, disp {data.get('dispersion')}")
         
         if data.get('tag') == "tag":
+            
+            node = self.nodes.get("Kalman")
+            node.real = (x, y)
+            node.distance = data.get('distance')
+            node.dispersion = data.get('dispersion')
+                
             self.estimate_tag_position()
         
         #signal Data Recieved
@@ -203,6 +223,9 @@ class Solver:
         tag_nodes = [node for node in self.nodes.values() if node.tag == "tag"]
         
         for node in tag_nodes:
+            
+            self.nodes["Kalman"] = Nodes("Kalman", "tag", node.real)
+            
             print(f"\n[SERVER] Sending measurement command to client: {node.id}...")
             
             payload = {"type": "command", "command": "start_tag"}
@@ -222,6 +245,8 @@ class Solver:
     def build_matrices(self):
         # build matrix for anchors to be used in position estimation
         anchor_nodes = [node for node in self.nodes.values() if node.tag == "anch"]
+        
+        print(anchor_nodes)
 
         distance_matrix = [node.distance for node in anchor_nodes]
         dispersion_matrix = [node.dispersion for node in anchor_nodes]
@@ -309,6 +334,74 @@ class Solver:
         #correct the RTC of calculation
         self.Correction_pos()
         
+    def filter_kalman(self, x, y):
+
+        # first setup kalman
+        if self.kf is None:
+            kf = KalmanFilter(dim_x=4, dim_z=2)  # state: [x,y,vx,vy], meas: [x,y]
+            kf.x = np.array([x, y, 0.0, 0.0], dtype=float)
+            kf.H = np.array([[1, 0, 0, 0],[0, 1, 0, 0]], dtype=float) # means x and y relate to state x and y
+            # [1x, 0y, 0vx, 0vy],[0x, 1y, 0vx, 0vy]
+
+            kf.P = np.eye(4, dtype=float) * 1.0
+
+            # Measurement noise needs to be set up 
+            meas_std = 0.19
+            kf.R = np.eye(2, dtype=float) * (meas_std ** 2)
+
+            self.kf = kf
+            self.kf_last_t = time.time()
+            return (x, y)
+
+        # time
+        now = time.time()
+        dt = now - self.kf_last_t
+        self.kf_last_t = now
+
+        # if timing goes bad
+        dt = float(max(1e-3, min(0.5, dt)))
+
+        self.kf.F = np.array([[1, 0, dt, 0],
+                            [0, 1, 0, dt],
+                            [0, 0, 1,  0],
+                            [0, 0, 0,  1]], dtype=float)
+
+        accel_std = 8.0  # m/s^2; can horse acelerate this fast?
+        q = accel_std ** 2
+        dt2 = dt * dt
+        dt3 = dt2 * dt
+        dt4 = dt2 * dt2
+        self.kf.Q = q * np.array([[dt4/4, 0,     dt3/2, 0],
+                             [0,     dt4/4, 0,     dt3/2],
+                             [dt3/2, 0,     dt2,   0],
+                             [0,     dt3/2, 0,     dt2]], dtype=float)
+
+        z = np.array([x, y], dtype=float)
+
+        self.kf.predict()
+        self.kf.update(z)
+
+        x_f = self.kf.x[0]
+        y_f = self.kf.x[1]
+        vx  = self.kf.x[2]
+        vy  = self.kf.x[3]
+        
+        #for visualisation
+        node = self.nodes.get("Kalman")
+        node.calculated = (x_f, y_f)
+        
+        return (x_f, y_f)
+
+    def append_csv_row(self, csv_path: str, row: dict):
+        file_exists = os.path.exists(csv_path)
+        fieldnames = list(row.keys())
+
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
+        
     def estimate_tag_position(self, dim=2):
         # Estimate tag position using known anchor locations.
         # magic also happens here
@@ -339,13 +432,45 @@ class Solver:
                     res.append(weight * (dij - distances[i]))
                 return np.array(res)
 
-            result = least_squares(residuals, x0, verbose=0)
+            result = least_squares(residuals, x0, verbose=0, loss="soft_l1")
             
             # Save directly to node
             tag_node.calculated = tuple(result.x)
             
+            x, y = result.x
+            
+            x_f, y_f = self.filter_kalman(x, y)
+            
+            x_real, y_real = tag_node.real
+            self.diff += math.hypot(x_real - x, y_real - y)
+            self.diff_k += math.hypot(x_real - x_f, y_real - y_f)
+            
+            
+            
+            if self.counter%5 == 0:
+            
+                row = {
+                    "timestamp": time.time(),
+                    "normal_diff": (self.diff/5),
+                    "kalman_diff": (self.diff_k/5)
+                }
+                
+                self.diff = 0
+                self.diff_k = 0
+                
+                self.counter =0
+                
+                csv_path = f"tables/kalman/mesurments-kalman-diff.csv"
+                self.append_csv_row(csv_path, row)
+                
+            self.counter += 1
+            
             # send update to UI
             self.send_UIData()
+            
+            
+            
+            
     
     def send_UIData(self):
         payload = {"nodes": [asdict(node) for node in self.nodes.values()]}
