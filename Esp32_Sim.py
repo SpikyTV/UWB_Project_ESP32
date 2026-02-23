@@ -1,3 +1,7 @@
+import csv
+import os
+import logging
+
 # threading and sync
 import threading
 
@@ -15,10 +19,24 @@ import uuid
 import time
 import random
 import math
-import running_value_calculation
 
 class ESP32_Sim:
     def __init__(self):
+        
+        logger = logging.getLogger()
+        logger.setLevel(logging.INFO)
+
+        formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+
+        console = logging.StreamHandler()
+        console.setFormatter(formatter)
+
+        file = logging.FileHandler("simulation.log")
+        file.setFormatter(formatter)
+
+        logger.addHandler(console)
+        logger.addHandler(file)
+        
         # data
         self.msg_queue = Queue()
         
@@ -31,6 +49,10 @@ class ESP32_Sim:
         
         self.BROKER_IP = "127.0.0.1"   #Mosquitto
         self.BROKER_PORT = 1883
+        
+        self.sample_id = 0
+        self.mesurment_id = 0
+        self.mesuring_anch = 0
         
         # MQTT Topics
         self.TOPIC = "hub/+/data"     
@@ -52,12 +74,13 @@ class ESP32_Sim:
         self.count = 0
         self.mean = 0.0
         self.M2 = 0.0
-        self.start_samples = 200
+        self.start_samples = 10
         self.max_error = 0.5
         self.number_of_samples = 200
         
         self.list_distance = []
         self.list_dispersion = []
+        self.list_distance = []
         
         self.others = {}
         
@@ -141,76 +164,18 @@ class ESP32_Sim:
         
         print("sending data")
         self.client.publish(topic, json.dumps(payload), qos=0)
-
-    #running value
-    def add(self, value: float):
-        # Always take first start_samples measurements
-        if self.count < self.start_samples:
-            accept = True
-        else:
-            # Accept only if within max_error from current mean
-            accept = abs(value - self.mean) <= self.max_error
-
-        if accept:
-            self.count += 1
-            delta = value - self.mean
-            self.mean += delta / self.count
-            delta2 = value - self.mean
-            self.M2 += delta * delta2
-
-    #Welford’s online algorithm readout
-    def get_dispersion(self):
-        if self.count < 2:
-            return 0.0
-        variance = self.M2 / (self.count - 1)
-        return variance ** 0.5
-
-    def make_mesurements(self, number_of_mesurments, real_distance):
-
-        self.count = 0
-        self.mean = 0.0
-        self.M2 = 0.0
-
-        for _ in range(number_of_mesurments):
-            distance = running_value_calculation.generate_distance(real_distance)
-            self.add(distance)
-
-        self.list_distance.append(self.mean)
-        self.list_dispersion.append(self.get_dispersion())
         
-        print(self.list_distance)
-        print(self.list_dispersion)
-        
+    def append_csv_row(self, csv_path: str, row: dict):
+        file_exists = os.path.exists(csv_path)
+        fieldnames = list(row.keys())
+
+        with open(csv_path, "a", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)    
     
-    def start_measurement(self):
-        print("Starting measurement routine...")
-       
-        self.list_distance = []
-        self.list_dispersion = []
-
-        
-        for other_id, data in sorted(self.others.items()):
-            
-            x2, y2 = data.get("cords")
-            tag = data.get("tag")
-            
-            if tag == "anch":
-                # Skip measuring distance to itself
-                if other_id == self.ESP_ID:
-                    self.list_distance.append(0.0)
-                    self.list_dispersion.append(0.0)
-                    continue
-                    
-                #dont ask me I dont remember (real distance)
-                x1, y1 = self.cords
-                distance = math.hypot(x2 - x1, y2 - y1)
-
-                if self.tag == "anch":
-                    self.make_mesurements(1500, distance)
-                elif self.tag == "tag":
-                    #only 20 samples per anchor when you are tag (expecte to take around 0.05 sec)
-                    self.make_mesurements(20, distance)
-       
+   
        
        
         self.send_measurement()
@@ -297,3 +262,70 @@ class ESP32_Sim:
                     self.others[data.get("id")] = {"cords": data.get("cords"), "tag": data.get("tag")}
                 else:
                     print(f"unknown type: {type}")
+                    
+#====================================================================================
+#            mesurment section (welford running value calculation)
+#====================================================================================
+
+    #closest disance generation to a real life UWB
+    def generate_distance(self, true_distance, std_deviation=0.3):
+        noise = random.gauss(0, std_deviation/2)
+            
+        if random.random() < 0.01:
+            noise += random.uniform(0.5, 3)
+        
+        return true_distance + noise
+        
+    #running value calculation
+    def update_distance_estimate(self, measured_distance, idx):
+        n = self.sample_counts[idx]
+        
+        #to avoid absolute counter
+        threshold = max(0.1, 3 * self.std_deviations[idx])
+        accept = True if n < self.start_samples else (abs(measured_distance - self.mean_distances[idx]) <= threshold)
+
+        if not accept:
+            return
+        
+        n +=1
+        self.sample_counts[idx] = n
+            
+        delta = measured_distance - self.mean_distances[idx]
+        self.mean_distances[idx] += delta / n
+        delta2 = measured_distance - self.mean_distances[idx]
+        self.M2[idx] += delta * delta2
+            
+        if n < 2:
+            self.std_deviations[idx] = 0.0
+        else:
+            self.std_deviations[idx] = math.sqrt(self.M2[idx] / (n - 1))
+            
+    #loops over every anchor to create set of mesurments 
+    def simulate_measurements(self, samples_per_anchor):
+        r = len(self.true_distances)
+        
+        for _ in range(samples_per_anchor):
+            for idx in range(r):
+                true_distance = self.true_distances[idx]
+                
+                #skips mesuurment with it self
+                if true_distance == 0:
+                    continue
+                    
+                distance = self.generate_distance(true_distance, 0.3)
+                self.update_distance_estimate(distance, idx)
+               
+    def initiate_lists(self):
+        r = len(self.true_distances)
+        self.mean_distances = [0.0] * r
+        self.std_deviations = [0.0] * r
+        self.M2 = [0.0] * r
+        self.sample_counts = [0] * r
+    
+    def start_measurement(self):
+        logging.info("Initializing ranging simulation")
+        
+        self.initiate_lists()
+        self.simulate_measurements(self.samples_per_anchor)
+        
+        self.publish_measurement()
