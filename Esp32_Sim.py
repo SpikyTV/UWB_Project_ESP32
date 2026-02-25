@@ -43,24 +43,14 @@ class ESP32_Sim:
         #uuid
         self.ESP_ID = uuid.uuid4().hex[:4]
         
-        self.tag = ""
+        self.tag = "N/A"
         
         self.cords = 0, 0
         
         self.BROKER_IP = "127.0.0.1"   #Mosquitto
         self.BROKER_PORT = 1883
         
-        self.sample_id = 0
-        self.mesurment_id = 0
-        self.mesuring_anch = 0
         
-        # MQTT Topics
-        self.TOPIC = "hub/+/data"     
-        self.TOPIC2 = "hub/+/command"     
-        self.TOPIC3 = "hub/+/register"     
-        self.TOPIC4 = "hub/+/UIData"
-        self.TOPIC5 = "hub/+/UICommand"
-        self.TOPIC6 = "hub/+/uwb"
         
         # MQTT client setup (version2)
         self.client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
@@ -71,198 +61,19 @@ class ESP32_Sim:
         
         print("MQTT server running...")
         
-        self.count = 0
-        self.mean = 0.0
-        self.M2 = 0.0
-        self.start_samples = 10
-        self.max_error = 0.5
-        self.number_of_samples = 200
         
-        self.list_distance = []
-        self.list_dispersion = []
-        self.list_distance = []
+        self.start_samples = 30
+        self.samples_per_anchor = 10
         
-        self.others = {}
+        self.M2 = []
+        self.mean_distances = []
+        self.std_deviations = []
+        self.sample_counts = []
+        self.true_distances = []
         
-        first_reg_payload = {
-            "id": self.ESP_ID,
-        }
-        
-        topic = "hub/ESP32_Manager/register"
-
-        #on connect sends register topic with 1 send garanteed
-        self.client.publish(topic, json.dumps(first_reg_payload), qos=1)
+        threading.Thread(target=self.message_processor, daemon=True).start()
+        self.push_satus()
     
-    def config(self, data):
-        self.ESP_ID = data.get("id")
-        self.tag = data.get("tag")
-        x = float(data.get("x"))
-        y = float(data.get("y"))
-        self.cords = (x, y)
-        
-        payload = {
-            "id": self.ESP_ID,
-            "x": x,
-            "y": y,
-            "tag": self.tag
-        }
-        
-        topic = f"hub/ESP32_Manager/update"
-
-        #on connect sends register topic with 1 send garanteed
-        self.client.publish(topic, json.dumps(payload), qos=1)
-        
-    def register(self):
-        x, y = self.cords
-        
-        registration_payload = {
-            "esp_id": self.ESP_ID,
-            "x": float(x),
-            "y": float(y),
-            "tag": self.tag
-        }
-        
-        topic = f"hub/solver/register"
-
-        #on connect sends register topic with 1 send garanteed
-        self.client.publish(topic, json.dumps(registration_payload), qos=1)
-        
-    
-    def on_connect(self, client, userdata, flags, reason_code, properties):
-        # MQTT on_connect callback
-        if reason_code == 0:
-            print(f"Connected to MQTT broker as ESP32 under {self.ESP_ID}")
-            self.client.subscribe(self.TOPIC2) # comunication with ESP32
-            self.client.subscribe(self.TOPIC6)
-        else:
-            print(f"Connection failed (reason_code={reason_code})")
-        
-    def on_message(self, client, userdata, msg):
-        # MQTT on_message callback
-        # queue to separate network from data processing
-        try:
-            topic_parts = msg.topic.split("/")
-            payload = json.loads(msg.payload.decode("utf-8"))
-            self.msg_queue.put((topic_parts[1], payload))
-        except Exception as e:
-            print("Error processing message:", e)
-
-    #message to send mesurements to server
-    def send_measurement(self):
-        x, y = self.cords
-        
-        payload = {
-            "tag": self.tag,
-            "esp_id": self.ESP_ID,
-            "distance": self.list_distance,
-            "dispersion": self.list_dispersion,
-            "x": x,
-            "y": y
-        }
-        
-        topic = f"hub/{self.ESP_ID}/data"
-        
-        print("sending data")
-        self.client.publish(topic, json.dumps(payload), qos=0)
-        
-    def append_csv_row(self, csv_path: str, row: dict):
-        file_exists = os.path.exists(csv_path)
-        fieldnames = list(row.keys())
-
-        with open(csv_path, "a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-            if not file_exists:
-                writer.writeheader()
-            writer.writerow(row)    
-    
-   
-       
-       
-        self.send_measurement()
-       
-    def pick_new_target(self):
-        self.target = (
-            random.uniform(5, 45),
-            random.uniform(6, 35)
-        )
-        self.speed = random.uniform(2, 8)  # m/s
-        
-    def update(self):
-        dt = 1 / 120
-        
-        x, y = self.cords
-        tx, ty = self.target
-
-        dx = tx - x
-        dy = ty - y
-        distance = math.hypot(dx, dy)
-
-        if distance < 0.1:
-            self.pick_new_target()
-            return
-
-        dx /= distance
-        dy /= distance
-
-        x += dx * self.speed * dt
-        y += dy * self.speed * dt
-
-        self.cords = (x, y)
-        
-    def run_cords(self):
-        self.pick_new_target()
-        
-        while True:
-            self.update()
-            time.sleep(1/120)
-    
-    def handle_command(self, data):
-        command = data.get("command")
-        
-        
-        if command == "start_measurement":
-            threading.Thread(target=self.start_measurement, daemon=True).start()
-        elif command == "start_tag":
-            threading.Thread(target=self.run_cords, daemon=True).start()
-            while True:
-                self.start_measurement()
-                time.sleep(0.05)
-        elif command == "uwb":
-            
-            time.sleep(1 + (int(self.ESP_ID.split("_")[-1]) * 0.05))
-            
-            payload = {
-                "type": "uwb",
-                "id": self.ESP_ID,
-                "cords": self.cords,
-                "tag": self.tag
-            }
-            
-            topic = "hub/uwb/uwb"
-
-            self.client.publish(topic, json.dumps(payload), qos=1)
-            
-        
-    def message_processor(self):
-        # processes MQTT messages
-        while True:
-            uuid, data = self.msg_queue.get()  # blocks until message is available
-
-            type = data.get("type")
-            
-            if uuid in (self.ESP_ID, "uwb"):
-                if type == "config":
-                    self.config(data)
-                elif type == "final_config":
-                    self.config(data)
-                    self.register()
-                elif type == "command":
-                    threading.Thread(target=self.handle_command, args=(data,), daemon=True).start()
-                elif type == "uwb":
-                    self.others[data.get("id")] = {"cords": data.get("cords"), "tag": data.get("tag")}
-                else:
-                    print(f"unknown type: {type}")
-                    
 #====================================================================================
 #            mesurment section (welford running value calculation)
 #====================================================================================
@@ -301,15 +112,15 @@ class ESP32_Sim:
             self.std_deviations[idx] = math.sqrt(self.M2[idx] / (n - 1))
             
     #loops over every anchor to create set of mesurments 
-    def simulate_measurements(self, samples_per_anchor):
+    def simulate_measurements(self):
         r = len(self.true_distances)
         
-        for _ in range(samples_per_anchor):
+        for _ in range(self.samples_per_anchor):
             for idx in range(r):
                 true_distance = self.true_distances[idx]
                 
                 #skips mesuurment with it self
-                if true_distance == 0:
+                if true_distance < 1e-6:
                     continue
                     
                 distance = self.generate_distance(true_distance, 0.3)
@@ -326,6 +137,148 @@ class ESP32_Sim:
         logging.info("Initializing ranging simulation")
         
         self.initiate_lists()
-        self.simulate_measurements(self.samples_per_anchor)
         
+        self.simulate_measurements()
         self.publish_measurement()
+
+        while self.tag == "tag":
+            time.sleep(0.5)
+            self.simulate_measurements()
+            self.push_ranging()
+        
+#====================================================================================
+#            comms section (mqtt)
+#====================================================================================    
+    
+    def push_satus(self):
+        self.status_payload = {
+            "status": "online",
+            "esp_id": self.ESP_ID,
+            "tag": self.tag,
+            "cords": self.cords,
+        }
+        
+        topic = f"hub/esp/{self.ESP_ID}/status"
+        self.client.publish(topic, json.dumps(self.status_payload), retain=True, qos=1)
+        
+    def push_ranging(self):
+        payload = {
+            "mean_distances": self.mean_distances,
+            "std_deviations": self.std_deviations,
+            "cords": self.cords,
+        }
+        
+        topic = f"hub/esp/{self.ESP_ID}/ranging"
+        self.client.publish(topic, json.dumps(payload), qos=0)
+        
+    def rec_config(self, data):
+        
+        if self.ESP_ID != data.get("esp_id"):
+            self.ESP_ID = data.get("esp_id")
+            
+            #resubscribe under propper id
+            self.client.subscribe(f"hub/esp/{self.ESP_ID}/cfg/config")
+            self.client.subscribe(f"hub/esp/{self.ESP_ID}/cmd/measure")
+            self.client.subscribe(f"hub/esp/{self.ESP_ID}/cmd/move")
+        
+        self.tag = data.get("tag")
+        self.cords = (float(data.get("x")), float(data.get("y")))
+        self.samples_per_anchor = data.get("samples_per_anchor")
+
+        self.push_satus()
+        
+    def rec_others(self, data):
+        nodes = data.get("nodes")
+        
+        self.true_distances.clear()
+        
+        x0, y0 = self.cords
+        for node in nodes:
+            x1, y1 = node.get("cords")
+            
+            d = math.hypot(x1 - x0, y1 - y0)
+            self.true_distances.append(d)
+       
+    def on_connect(self, client, userdata, flags, reason_code, properties):
+        # MQTT on_connect callback
+        if reason_code == 0:
+            logging.info(f"Connected to MQTT broker as ESP32 under {self.ESP_ID}")
+            
+            self.client.subscribe(f"hub/esp/{self.ESP_ID}/cfg/config")
+            self.client.subscribe("hub/esp/bcast/cfg/others")
+            self.client.subscribe(f"hub/esp/{self.ESP_ID}/cmd/measure")
+            self.client.subscribe(f"hub/esp/{self.ESP_ID}/cmd/move")
+        else:
+            logging.error(f"Connection failed (reason_code={reason_code})")
+        
+    def on_message(self, client, userdata, msg):
+        # MQTT on_message callback
+        # queue to separate network from data processing
+        try:
+            topic_parts = msg.topic.split("/")
+            payload = json.loads(msg.payload.decode("utf-8"))
+            self.msg_queue.put((topic_parts[3], topic_parts[4], payload))
+        except Exception as e:
+            logging.error("Error processing message: %s", e)
+            
+    def message_processor(self):
+        # processes MQTT messages
+        while True:
+            category, command, data = self.msg_queue.get()  # blocks until message is available
+
+            if category == "cfg":
+                if command == "config":
+                    self.rec_config(data)
+                elif command == "others":
+                    self.rec_others(data)
+                else:
+                    logging.error("Unknown command: %s", command)
+            elif category == "cmd":
+                if command == "measure":
+                    threading.Thread(target=self.start_measurement, daemon=True).start()
+                elif command == "move":
+                    self.toggle_move()
+                else:
+                    logging.error("Unknown command: %s", command)
+            else:
+                logging.error("Unknown category: %s", category)
+                
+#====================================================================================
+#            movement section
+#====================================================================================
+    def pick_new_target(self):
+        self.target = (
+            random.uniform(5, 45),
+            random.uniform(6, 35)
+        )
+        self.speed = random.uniform(2, 8)  # m/s
+        
+    def update(self):
+        dt = 1 / 120
+        
+        x, y = self.cords
+        tx, ty = self.target
+
+        dx = tx - x
+        dy = ty - y
+        distance = math.hypot(dx, dy)
+
+        if distance < 0.1:
+            self.pick_new_target()
+            return
+
+        dx /= distance
+        dy /= distance
+
+        x += dx * self.speed * dt
+        y += dy * self.speed * dt
+
+        self.cords = (x, y)
+        
+    def run_cords(self):
+        self.pick_new_target()
+        
+        while True:
+            self.update()
+            time.sleep(1/120)
+    
