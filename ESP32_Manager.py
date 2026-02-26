@@ -1,3 +1,6 @@
+import os
+import logging
+
 # threading and sync
 import threading
 
@@ -21,27 +24,37 @@ class Nodes:
     
     id: str
     tag: str
-    real: tuple[float, float]
+    cords: tuple[float, float]
     
     def __str__(self):
         # user readable node print out
         
         return (f"{self.id} | {self.tag} | "
-                f"{self.real[0]:.2f}/{self.real[1]:.2f}")
+                f"{self.cords[0]:.2f}/{self.cords[1]:.2f}")
 
 #the naming could use some work
 class ESP32_Manager:
     def __init__(self):
+        logger = logging.getLogger()
+        logger.setLevel(logging.INFO)
+
+        formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+
+        console = logging.StreamHandler()
+        console.setFormatter(formatter)
+
+        file = logging.FileHandler(f"ESP_manager.log")
+        file.setFormatter(formatter)
+
+        logger.addHandler(console)
+        logger.addHandler(file)
+        
         self.BROKER_IP = "127.0.0.1"   #Mosquitto
         self.BROKER_PORT = 1883
         
-        # MQTT Topics
-        self.TOPIC = "hub/+/data"     
-        self.TOPIC2 = "hub/+/command"     
-        self.TOPIC3 = "hub/ESP32_Manager/register"     
-        self.TOPIC6 = "hub/ESP32_Manager/update" 
-        self.TOPIC4 = "hub/+/UIData"
-        self.TOPIC5 = "hub/ESP32_Manager/UICommand"
+        # data
+        self.msg_queue = Queue()
+        
         
         # MQTT client setup (version2)
         self.client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
@@ -52,105 +65,96 @@ class ESP32_Manager:
         
         print("MQTT server running...")
         
-        # data
-        self.msg_queue = Queue()
+        
         
         self.nodes = {}
         
+#====================================================================================
+#            comms basic section (mqtt)
+#====================================================================================       
         
-    def register_client(self, node_id):
-        
-        print("recievd first reg")
-        
-        id = f"ESP32_{len(self.nodes)}"
-        self.nodes[id] = Nodes(id, "NotSet", (0, 0))
-        
-        payload = {
-            "type": "config",
-            "id": id,
-            "tag": "NotSet",
-            "x": 0,
-            "y": 0,
-        }
-        
-        topic = f"hub/{node_id}/command"
-        
-        print(f"sending data to {topic}")
-        
-        self.client.publish(topic, json.dumps(payload), qos=1)
-        
-    def update_client(self, data):
-        node = self.nodes[data.get("id")]
-        
-        node.tag = data.get("tag")
-        node.real = (data.get("x"), data.get("y")) #TODO not used anywhere 
-        
-        self.send_UIData()
-        
-    def send_UIData(self):
-        payload = {"nodes": [asdict(node) for node in self.nodes.values()]}
-        
-        topic = f"hub/ESP32_Manager/UIData"
-        self.client.publish(topic, json.dumps(payload), qos=1)
-    
     def on_connect(self, client, userdata, flags, reason_code, properties):
         # MQTT on_connect callback
         if reason_code == 0:
-            print("Connected to MQTT broker")
-            self.client.subscribe(self.TOPIC3) # comunication with ESP32
-            self.client.subscribe(self.TOPIC5) # comunication with gui
-            self.client.subscribe(self.TOPIC6) # comunication with ESP32
+            logging.info("Connected to MQTT broker")
+            self.client.subscribe("hub/esp/+/status")
+            self.client.subscribe("hub/manager/cmd/create_sim")
+            self.client.subscribe("hub/manager/cmd/config_push")
         else:
-            print(f"Connection failed (reason_code={reason_code})")
+            logging.error(f"Connection failed (reason_code={reason_code})")
         
     def on_message(self, client, userdata, msg):
         # MQTT on_message callback
-        # queue to separate network from data processing
         try:
             topic_parts = msg.topic.split("/")
-            payload = json.loads(msg.payload.decode("utf-8"))
-            self.msg_queue.put((topic_parts[2], payload))
+            raw = msg.payload.decode("utf-8").strip()
+            if raw:
+                payload = json.loads(raw)
+            else:
+                payload = {}
+            self.msg_queue.put((topic_parts, payload))
         except Exception as e:
-            print("Error processing message:", e)
-
+            logging.error("Error processing message: %s", e)    
+        
     def message_processor(self):
         # processes MQTT messages
         while True:
-            in_topic, data = self.msg_queue.get()  # blocks until message is available
+            topic_parts, data = self.msg_queue.get()  # blocks until message is available
 
-            print(f"Processing {in_topic}")
-            
-            if in_topic == "register":
-                self.register_client(data.get("id"))
-            elif in_topic == "update":
-                self.update_client(data)
-            elif in_topic == "UICommand":
-                self.handle_UIcommand(data)
+            if topic_parts[2] == "cmd":
+                if topic_parts[3] == "create_sim":
+                    amount = int(data.get("amount", 1))
+                    for _ in range(amount):
+                        self.add_ESP32()
+                elif topic_parts[3] == "config_push":
+                    self.update_client(data)
+                else:
+                    logging.error(f"unknown cmd: {topic_parts}") 
+            elif topic_parts[1] == "esp":
+                self.update_node(data)
             else:
-                print(f"unknown topic: {in_topic}")
+                logging.error(f"unknown topic: {topic_parts}")  
+            
+#====================================================================================
+#            comms section (mqtt)
+#====================================================================================           
+        
+    def update_node(self, data):
+        node_id = data.get("esp_id")
+        tag = data.get("tag")
+        cords = data.get("cords")
+        
+        if node_id in self.nodes:
+            node = self.nodes[node_id]
+            node.tag = tag
+            node.cords = cords
+        else: 
+            self.nodes[node_id] = Nodes(node_id, tag, cords)
+            
+        self.send_UIData()
+             
+    def update_client(self, data):
+        payload = {
+            "tag": data.get("tag"),
+            "cords": data.get("cords"),
+            "samples_per_anchor": data.get("samples_per_anchor")
+        }
+        
+        topic = f"hub/esp/{data.get('esp_id')}/cfg/config"
+        
+        self.client.publish(topic, json.dumps(payload), retain=True, qos=1)
+             
+    def send_UIData(self):
+        payload = {"nodes": [asdict(node) for node in self.nodes.values()]}
+        
+        topic = "hub/manager/state/nodes"
+        self.client.publish(topic, json.dumps(payload), retain=True, qos=1)
     
     def add_ESP32(self):
-        print ("adding ESP32")
+        logging.info("adding ESP32")
         esp32 = ESP32_Sim()
         threading.Thread(target=esp32.message_processor, daemon=True).start()
         
-    def configure_ESP32(self, tag, cords):
-        print (f"configuring ESP32 WITH {tag} and {cords}")
-
-    def handle_UIcommand(self, data):
-        # command handeling
-        command = data.get("command")
-        
-        print(f"executing command {command}")
-        
-        if command == "add_ESP32":
-            self.add_ESP32()
-        elif command == "configure_ESP32":
-            tag = data.get("tag")
-            cords= data.get("cords")
-            self.configure_ESP32(tag, cords)
-        elif command == "send_nodes":
-            self.send_UIData()
 
 if __name__ == "__main__":
     manager = ESP32_Manager()
