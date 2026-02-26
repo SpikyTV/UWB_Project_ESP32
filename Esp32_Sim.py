@@ -50,6 +50,8 @@ class ESP32_Sim:
         self.BROKER_IP = "127.0.0.1"   #Mosquitto
         self.BROKER_PORT = 1883
         
+        self.target = (0, 0)
+        self.speed = 2
         
         
         # MQTT client setup (version2)
@@ -70,6 +72,8 @@ class ESP32_Sim:
         self.std_deviations = []
         self.sample_counts = []
         self.true_distances = []
+        
+        self.move = False
         
         threading.Thread(target=self.message_processor, daemon=True).start()
         self.push_satus()
@@ -237,7 +241,11 @@ class ESP32_Sim:
                 if command == "measure":
                     threading.Thread(target=self.start_measurement, daemon=True).start()
                 elif command == "move":
-                    self.toggle_move()
+                    if self.move:
+                        self.move = False
+                    else:
+                        self.move = True
+                        threading.Thread(target=self.run_cords, daemon=True).start()
                 else:
                     logging.error("Unknown command: %s", command)
             else:
@@ -247,20 +255,15 @@ class ESP32_Sim:
 #            movement section
 #====================================================================================
     def pick_new_target(self):
-        self.target = (
-            random.uniform(5, 45),
-            random.uniform(6, 35)
-        )
-        self.speed = random.uniform(2, 8)  # m/s
+        self.target = (random.uniform(5, 45), random.uniform(6, 35)) #x,y
+        self.speed = random.uniform(2, 8) #m/s
         
-    def update(self):
-        dt = 1 / 120
-        
-        x, y = self.cords
-        tx, ty = self.target
+    def update(self, dt):
+        x0, y0 = self.cords
+        x1, y1 = self.target
 
-        dx = tx - x
-        dy = ty - y
+        dx = x1 - x0
+        dy = y1 - y0
         distance = math.hypot(dx, dy)
 
         if distance < 0.1:
@@ -270,15 +273,16 @@ class ESP32_Sim:
         dx /= distance
         dy /= distance
 
-        x += dx * self.speed * dt
-        y += dy * self.speed * dt
+        x0 += dx * self.speed * dt
+        y0 += dy * self.speed * dt
 
-        self.cords = (x, y)
+        self.cords = (x0, y0)
         
     def run_cords(self):
         self.pick_new_target()
+        dt = 1 / 120
         
-        while True:
-            self.update()
-            time.sleep(1/120)
+        while self.move:
+            self.update(dt)
+            time.sleep(dt)
     
